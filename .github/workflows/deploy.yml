@@ -10,8 +10,8 @@ on:
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
-  AZURE_RESOURCE_GROUP: rg-botel-voice-v2-dev
-  AZURE_CONTAINER_APP: ca-media-worker-dev
+  AZURE_RESOURCE_GROUP: ${{ secrets.AZURE_RESOURCE_GROUP }}
+  AZURE_CONTAINER_APP: ${{ secrets.AZURE_CONTAINER_APP }}
 
 jobs:
   build-and-deploy:
