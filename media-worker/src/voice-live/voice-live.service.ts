@@ -1,7 +1,8 @@
 import { Injectable, Logger, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { EventEmitter2 } from '@nestjs/event-emitter';
-import * as WebSocket from 'ws';
+import { WebSocket } from 'ws';
+import type { Data as WebSocketData } from 'ws';
 
 export interface VoiceLiveConfig {
   model: string;
@@ -67,7 +68,7 @@ export class VoiceLiveService implements OnModuleInit, OnModuleDestroy {
           resolve();
         });
 
-        this.ws.on('message', (data: WebSocket.Data) => {
+        this.ws.on('message', (data: WebSocketData) => {
           this.handleMessage(data);
         });
 
@@ -191,7 +192,7 @@ export class VoiceLiveService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  private handleMessage(data: WebSocket.Data): void {
+  private handleMessage(data: WebSocketData): void {
     try {
       // Check if it's binary audio data
       if (data instanceof Buffer) {
