@@ -1,7 +1,7 @@
 import { Injectable, Logger, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { EventEmitter2 } from '@nestjs/event-emitter';
-import WebSocket from 'ws';
+import * as WebSocket from 'ws';
 
 export interface VoiceLiveConfig {
   model: string;
