@@ -88,3 +88,5 @@ Your new media worker will be available at:
 ok
 3. 🧪 Test the media worker endpoints
 4. 📊 Monitor performance and latency 
+
+done
