@@ -35,6 +35,8 @@
    - ❌ Hardcoded resource group in workflow
    - ❌ Expired Azure credentials
    - ✅ Updated secrets and workflow configuration
+   ,,,,,,,,,
+   
 
 ---
 
