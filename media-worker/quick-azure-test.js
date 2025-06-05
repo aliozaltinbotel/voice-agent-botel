@@ -1,7 +1,7 @@
 const https = require('https');
 const { performance } = require('perf_hooks');
 
-const AZURE_URL = 'https://ca-media-worker-dev.blacksea-417b6c91.eastus2.azurecontainerapps.io';
+const AZURE_URL = 'https://ca-media-worker-dev.victorioustree-4c25e022.eastus2.azurecontainerapps.io';
 
 async function testAzureDeployment() {
   console.log('🚀 Testing Azure Container Apps Deployment...');

@@ -12,6 +12,8 @@ export default () => ({
     endpoint: process.env.SPEECH_ENDPOINT || '',
     key: process.env.SPEECH_KEY || '',
     region: process.env.SPEECH_REGION || 'eastus2',
+    containerMode: process.env.SPEECH_CONTAINER_MODE === 'true',
+    containerHost: process.env.SPEECH_CONTAINER_HOST || '',
   },
   acs: {
     connectionString: process.env.ACS_CONNECTION_STRING || '',

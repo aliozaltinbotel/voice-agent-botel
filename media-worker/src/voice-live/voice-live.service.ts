@@ -28,6 +28,10 @@ export class VoiceLiveService implements OnModuleInit, OnModuleDestroy {
   private conversationId: string | null = null;
   private audioBuffer: Buffer[] = [];
   private pushStream: speechSdk.PushAudioInputStream | null = null;
+  private reconnectAttempts = 0;
+  private readonly maxReconnectAttempts = 5;
+  private reconnectTimeout: NodeJS.Timeout | null = null;
+  private wsConnectionUrl: string | null = null;
 
   constructor(
     private readonly configService: ConfigService,
@@ -52,16 +56,43 @@ export class VoiceLiveService implements OnModuleInit, OnModuleDestroy {
   async initializeSpeechSDK(): Promise<void> {
     const speechKey = this.configService.get<string>('speech.key');
     const region = this.configService.get<string>('speech.region');
+    const useContainerMode = this.configService.get<boolean>('speech.containerMode', false);
+    const containerHost = this.configService.get<string>('speech.containerHost');
 
-    if (!speechKey || !region) {
-      throw new Error('Speech service key and region are required for Voice Live API');
+    // In container mode, we use host authentication
+    if (useContainerMode && containerHost) {
+      try {
+        this.logger.log(`Initializing Speech SDK in container mode with host: ${containerHost}`);
+        
+        // Use host authentication for containers
+        this.speechConfig = speechSdk.SpeechConfig.fromHost(new URL(containerHost));
+        
+      } catch (error) {
+        this.logger.error('Failed to initialize Speech SDK in container mode:', error);
+        throw error;
+      }
+    } else {
+      // Cloud mode - use subscription authentication
+      if (!speechKey || !region) {
+        throw new Error('Speech service key and region are required for Voice Live API in cloud mode');
+      }
+
+      try {
+        // Store WebSocket URL for logging
+        this.wsConnectionUrl = `wss://${region}.stt.speech.microsoft.com/speech/recognition/conversation/cognitiveservices/v1?language=en-US&format=simple&profanity=masked`;
+        this.logger.log(`Connecting to Azure Speech Services at ${this.wsConnectionUrl}`);
+
+        // Create Speech Configuration
+        this.speechConfig = speechSdk.SpeechConfig.fromSubscription(speechKey, region);
+        
+      } catch (error) {
+        this.logger.error('Failed to initialize Speech SDK in cloud mode:', error);
+        throw error;
+      }
     }
 
     try {
-      // Create Speech Configuration
-      this.speechConfig = speechSdk.SpeechConfig.fromSubscription(speechKey, region);
-      
-      // Configure speech recognition settings
+      // Common configuration for both modes
       this.speechConfig.speechRecognitionLanguage = 'en-US';
       this.speechConfig.outputFormat = speechSdk.OutputFormat.Simple;
       
@@ -74,21 +105,37 @@ export class VoiceLiveService implements OnModuleInit, OnModuleDestroy {
         speechSdk.PropertyId.Speech_SegmentationSilenceTimeoutMs,
         '500'
       );
+      
+      // Enable interim results
+      this.speechConfig.setProperty(
+        speechSdk.PropertyId.SpeechServiceResponse_RequestSentenceBoundary,
+        'true'
+      );
+
+      // Set connection timeout
+      this.speechConfig.setProperty(
+        speechSdk.PropertyId.SpeechServiceConnection_EndSilenceTimeoutMs,
+        '1000'
+      );
+
+      // Enable WebSocket compression if supported
+      this.speechConfig.setProperty(
+        'SPEECH-EnableCompression',
+        'true'
+      );
 
       // Create push stream for audio input
       this.pushStream = speechSdk.AudioInputStream.createPushStream();
       this.audioConfig = speechSdk.AudioConfig.fromStreamInput(this.pushStream);
 
-      // Create speech recognizer
-      this.speechRecognizer = new speechSdk.SpeechRecognizer(this.speechConfig, this.audioConfig);
-
-      // Set up event handlers
-      this.setupEventHandlers();
+      // Create speech recognizer with connection verification
+      await this.createAndVerifyRecognizer();
 
       // Create speech synthesizer for TTS
       this.speechSynthesizer = new speechSdk.SpeechSynthesizer(this.speechConfig);
 
       this.isConnectedFlag = true;
+      this.reconnectAttempts = 0;
       this.logger.log('Azure Speech SDK initialized successfully');
 
       // Process any buffered audio
@@ -96,7 +143,72 @@ export class VoiceLiveService implements OnModuleInit, OnModuleDestroy {
 
     } catch (error) {
       this.logger.error('Failed to initialize Azure Speech SDK:', error);
+      
+      // Try to reconnect if it's a connection error
+      if (this.shouldRetryConnection(error)) {
+        this.scheduleReconnect();
+      }
+      
       throw error;
+    }
+  }
+
+  private async createAndVerifyRecognizer(): Promise<void> {
+    // Create speech recognizer
+    this.speechRecognizer = new speechSdk.SpeechRecognizer(this.speechConfig!, this.audioConfig!);
+
+    // Set up event handlers
+    this.setupEventHandlers();
+
+    // In container environments, WebSocket connections might need special handling
+    const isContainerEnvironment = process.env.WEBSITE_HOSTNAME || process.env.CONTAINER_APP_NAME;
+    
+    if (isContainerEnvironment) {
+      this.logger.log('Running in container environment, configuring WebSocket settings...');
+      
+      // Set proxy configuration if available
+      const httpProxy = process.env.HTTP_PROXY || process.env.http_proxy;
+      if (httpProxy) {
+        // Note: Speech SDK proxy support might be limited in some environments
+        this.logger.log(`HTTP proxy detected: ${httpProxy} (proxy support depends on SDK version)`);
+      }
+      
+      // Set custom properties for container environments
+      this.speechConfig!.setProperty('SPEECH-LogFilename', '/tmp/speech-sdk.log');
+      this.speechConfig!.setProperty('SPEECH-Recognition-Backend-Timeout', '30000');
+    }
+
+    // Skip connection verification in container environments as it might fail during initialization
+    // The SDK will handle connection establishment when recognition starts
+    if (!isContainerEnvironment) {
+      // Verify connection by creating a connection object
+      const connection = speechSdk.Connection.fromRecognizer(this.speechRecognizer);
+      
+      // Set up connection event handlers
+      connection.openConnection();
+      
+      // Wait for connection with timeout
+      await new Promise<void>((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          reject(new Error('Connection timeout after 10 seconds'));
+        }, 10000);
+
+        connection.connected = () => {
+          clearTimeout(timeout);
+          this.logger.log('WebSocket connection established successfully');
+          resolve();
+        };
+
+        connection.disconnected = () => {
+          clearTimeout(timeout);
+          this.logger.warn('WebSocket connection disconnected');
+          if (this.isConnectedFlag) {
+            this.handleDisconnection();
+          }
+        };
+      });
+    } else {
+      this.logger.log('Skipping connection verification in container environment');
     }
   }
 
@@ -134,6 +246,11 @@ export class VoiceLiveService implements OnModuleInit, OnModuleDestroy {
       if (e.reason === speechSdk.CancellationReason.Error) {
         this.logger.error(`Error details: ${e.errorDetails}`);
         this.eventEmitter.emit('voice-live.error', new Error(e.errorDetails));
+        
+        // Handle connection errors
+        if (e.errorDetails?.includes('WebSocket') || e.errorDetails?.includes('1006')) {
+          this.handleWebSocketError(e.errorDetails);
+        }
       }
     };
 
@@ -152,6 +269,94 @@ export class VoiceLiveService implements OnModuleInit, OnModuleDestroy {
         sessionId: e.sessionId,
       });
     };
+  }
+
+  private handleWebSocketError(errorDetails: string): void {
+    this.logger.error('WebSocket error:', errorDetails);
+    
+    if (this.shouldRetryConnection(new Error(errorDetails))) {
+      this.handleDisconnection();
+    }
+  }
+
+  private handleDisconnection(): void {
+    this.isConnectedFlag = false;
+    this.logger.warn('Lost connection to Azure Speech Services');
+    
+    // Clean up current recognizer
+    if (this.speechRecognizer) {
+      this.speechRecognizer.close();
+      this.speechRecognizer = null;
+    }
+    
+    // Schedule reconnection
+    this.scheduleReconnect();
+  }
+
+  private shouldRetryConnection(error: unknown): boolean {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    
+    // Check for connection-related errors
+    return (
+      errorMessage.includes('WebSocket') ||
+      errorMessage.includes('1006') ||
+      errorMessage.includes('timeout') ||
+      errorMessage.includes('connection') ||
+      errorMessage.includes('network')
+    ) && this.reconnectAttempts < this.maxReconnectAttempts;
+  }
+
+  private scheduleReconnect(): void {
+    if (this.reconnectTimeout) {
+      clearTimeout(this.reconnectTimeout);
+    }
+    
+    this.reconnectAttempts++;
+    const delay = Math.min(1000 * Math.pow(2, this.reconnectAttempts), 16000); // Exponential backoff, max 16s
+    
+    this.logger.log(`Attempting to reconnect (${this.reconnectAttempts}/${this.maxReconnectAttempts}) in ${delay}ms`);
+    
+    this.reconnectTimeout = setTimeout(() => {
+      this.reconnect();
+    }, delay);
+  }
+
+  private async reconnect(): Promise<void> {
+    try {
+      this.logger.log('Reconnecting to Azure Speech Services...');
+      
+      if (this.speechConfig && this.audioConfig) {
+        await this.createAndVerifyRecognizer();
+        
+        // If we have an active conversation, restart recognition
+        if (this.conversationId && this.speechRecognizer) {
+          await this.speechRecognizer.startContinuousRecognitionAsync();
+        }
+        
+        this.isConnectedFlag = true;
+        this.reconnectAttempts = 0;
+        this.logger.log('Successfully reconnected to Azure Speech Services');
+        
+        // Process any buffered audio
+        this.processBufferedAudio();
+        
+        this.eventEmitter.emit('voice-live.reconnected', {
+          conversationId: this.conversationId,
+        });
+      }
+    } catch (error) {
+      this.logger.error('Reconnection failed:', error);
+      
+      if (this.shouldRetryConnection(error)) {
+        this.scheduleReconnect();
+      } else {
+        this.logger.error('Maximum reconnection attempts reached');
+        this.eventEmitter.emit('voice-live.connection.failed', {
+          conversationId: this.conversationId,
+          error: error instanceof Error ? error.message : 'Unknown error',
+        });
+      }
+    }
   }
 
   async startConversation(

@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { CosmosClient } from '@azure/cosmos';
+import * as WebSocket from 'ws';
 
 interface ConnectivityTest {
   service: string;
@@ -111,36 +112,65 @@ export class ConnectivityService {
         };
       }
 
-      // Test Azure Speech Services connectivity using the Speech SDK approach
-      // We test the REST API endpoint that the Speech SDK uses internally
-      const testUrl = `https://${region}.api.cognitive.microsoft.com/speechtotext/v3.1/models/base`;
+      // Test WebSocket connectivity to Azure Speech Services
+      const wsEndpoint = `wss://${region}.stt.speech.microsoft.com/speech/recognition/conversation/cognitiveservices/v1`;
       
-      const response = await fetch(testUrl, {
-        method: 'GET',
+      // Create a WebSocket connection with proper headers
+      const ws = new WebSocket(wsEndpoint, {
         headers: {
           'Ocp-Apim-Subscription-Key': speechKey,
         },
-        signal: AbortSignal.timeout(5000),
+        handshakeTimeout: 5000,
+      });
+
+      // Wait for connection with timeout
+      const connectionResult = await new Promise<{ success: boolean; error?: string }>((resolve) => {
+        const timeout = setTimeout(() => {
+          ws.close();
+          resolve({ success: false, error: 'Connection timeout after 5 seconds' });
+        }, 5000);
+
+        ws.on('open', () => {
+          clearTimeout(timeout);
+          ws.close();
+          resolve({ success: true });
+        });
+
+        ws.on('error', (error) => {
+          clearTimeout(timeout);
+          resolve({ success: false, error: error.message });
+        });
+
+        ws.on('unexpected-response', (req, res) => {
+          clearTimeout(timeout);
+          let body = '';
+          res.on('data', (chunk) => { body += chunk; });
+          res.on('end', () => {
+            resolve({ 
+              success: false, 
+              error: `HTTP ${res.statusCode}: ${res.statusMessage}. ${body}` 
+            });
+          });
+        });
       });
 
       const latency = Date.now() - startTime;
-      const endpoint = `https://${region}.api.cognitive.microsoft.com/`;
 
-      if (response.ok) {
+      if (connectionResult.success) {
         return {
           service: 'Voice Live API',
           status: 'success',
           latency,
-          message: 'Azure Speech SDK connectivity verified',
-          endpoint,
+          message: 'WebSocket connection successful',
+          endpoint: wsEndpoint,
         };
       } else {
         return {
           service: 'Voice Live API',
           status: 'error',
           latency,
-          message: `HTTP ${response.status}: ${response.statusText}`,
-          endpoint,
+          message: connectionResult.error || 'WebSocket connection failed',
+          endpoint: wsEndpoint,
         };
       }
     } catch (error) {
@@ -151,7 +181,7 @@ export class ConnectivityService {
         status: 'error',
         latency,
         message: `Connection failed: ${error instanceof Error ? error.message : 'Unknown error'}`,
-        endpoint: `https://${region}.api.cognitive.microsoft.com/`,
+        endpoint: `wss://${region}.stt.speech.microsoft.com/speech/recognition/conversation/cognitiveservices/v1`,
       };
     }
   }
