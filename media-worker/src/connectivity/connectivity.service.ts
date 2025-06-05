@@ -169,10 +169,10 @@ export class ConnectivityService {
         };
       }
 
-      // Test Speech Services health endpoint
-      const healthUrl = `${endpoint.replace(/\/$/, '')}/speechtotext/v3.2/health/status`;
+      // Test Speech Services endpoint accessibility
+      const testUrl = `${endpoint.replace(/\/$/, '')}/speechtotext/v3.1/transcriptions`;
       
-      const response = await fetch(healthUrl, {
+      const response = await fetch(testUrl, {
         method: 'GET',
         headers: {
           'Ocp-Apim-Subscription-Key': key,
@@ -338,8 +338,8 @@ export class ConnectivityService {
 
       const latency = Date.now() - startTime;
 
-      // 401 is expected without authentication
-      if (response.status === 401 || response.ok) {
+      // 401 or 403 is expected without proper authentication
+      if (response.status === 401 || response.status === 403 || response.ok) {
         return {
           service: 'Azure Key Vault',
           status: 'success',
