@@ -1,8 +1,7 @@
 import { Injectable, Logger, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { EventEmitter2 } from '@nestjs/event-emitter';
-import { WebSocket } from 'ws';
-import type { Data as WebSocketData } from 'ws';
+import * as speechSdk from 'microsoft-cognitiveservices-speech-sdk';
 
 export interface VoiceLiveConfig {
   model: string;
@@ -21,13 +20,14 @@ export interface ConversationConfig {
 @Injectable()
 export class VoiceLiveService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(VoiceLiveService.name);
-  private ws: WebSocket | null = null;
-  private reconnectAttempts = 0;
-  private readonly maxReconnectAttempts = 5;
-  private readonly reconnectDelay = 1000;
+  private speechConfig: speechSdk.SpeechConfig | null = null;
+  private audioConfig: speechSdk.AudioConfig | null = null;
+  private speechRecognizer: speechSdk.SpeechRecognizer | null = null;
+  private speechSynthesizer: speechSdk.SpeechSynthesizer | null = null;
   private isConnectedFlag = false;
   private conversationId: string | null = null;
   private audioBuffer: Buffer[] = [];
+  private pushStream: speechSdk.PushAudioInputStream | null = null;
 
   constructor(
     private readonly configService: ConfigService,
@@ -37,9 +37,9 @@ export class VoiceLiveService implements OnModuleInit, OnModuleDestroy {
   async onModuleInit() {
     const enabled = this.configService.get<boolean>('voiceLive.enabled');
     if (enabled) {
-      // Connect in background - don't block application startup
-      this.connect().catch((error) => {
-        this.logger.error('Failed to connect to Voice Live API during startup:', error);
+      // Initialize Speech SDK in background - don't block application startup
+      this.initializeSpeechSDK().catch((error) => {
+        this.logger.error('Failed to initialize Azure Speech SDK during startup:', error);
         this.logger.warn('Voice Live API will be unavailable. Application will continue without it.');
       });
     }
@@ -49,192 +49,268 @@ export class VoiceLiveService implements OnModuleInit, OnModuleDestroy {
     this.disconnect();
   }
 
-  async connect(): Promise<void> {
-    const endpoint = this.configService.get<string>('voiceLive.endpoint');
+  async initializeSpeechSDK(): Promise<void> {
     const speechKey = this.configService.get<string>('speech.key');
     const region = this.configService.get<string>('speech.region');
 
-    if (!speechKey) {
-      throw new Error('Speech service key is required for Voice Live API connection');
+    if (!speechKey || !region) {
+      throw new Error('Speech service key and region are required for Voice Live API');
     }
 
-    // Build the proper Azure Speech Services WebSocket URL with required parameters
-    const url = new URL(endpoint!);
-    url.searchParams.set('language', 'en-US');
-    url.searchParams.set('format', 'simple');
-    url.searchParams.set('profanity', 'masked');
+    try {
+      // Create Speech Configuration
+      this.speechConfig = speechSdk.SpeechConfig.fromSubscription(speechKey, region);
+      
+      // Configure speech recognition settings
+      this.speechConfig.speechRecognitionLanguage = 'en-US';
+      this.speechConfig.outputFormat = speechSdk.OutputFormat.Simple;
+      
+      // Enable continuous recognition for real-time processing
+      this.speechConfig.setProperty(
+        speechSdk.PropertyId.SpeechServiceConnection_InitialSilenceTimeoutMs,
+        '5000'
+      );
+      this.speechConfig.setProperty(
+        speechSdk.PropertyId.Speech_SegmentationSilenceTimeoutMs,
+        '500'
+      );
 
-    this.logger.log(`Connecting to Azure Speech Services at ${url.toString()}`);
+      // Create push stream for audio input
+      this.pushStream = speechSdk.AudioInputStream.createPushStream();
+      this.audioConfig = speechSdk.AudioConfig.fromStreamInput(this.pushStream);
 
-    return new Promise((resolve, reject) => {
-      // Set a timeout for connection attempt
-      const connectionTimeout = setTimeout(() => {
-        if (this.ws) {
-          this.ws.terminate();
-        }
-        reject(new Error('Connection timeout after 10 seconds'));
-      }, 10000);
+      // Create speech recognizer
+      this.speechRecognizer = new speechSdk.SpeechRecognizer(this.speechConfig, this.audioConfig);
 
-      try {
-        this.ws = new WebSocket(url.toString(), {
-          headers: {
-            'Ocp-Apim-Subscription-Key': speechKey,
-            'X-ConnectionId': this.generateConnectionId(),
-            'Authorization': `Bearer ${speechKey}`,
-            'Content-Type': 'application/json',
-          },
-        });
+      // Set up event handlers
+      this.setupEventHandlers();
 
-        this.ws.on('open', () => {
-          clearTimeout(connectionTimeout);
-          this.logger.log('Connected to Azure Speech Services WebSocket');
-          this.isConnectedFlag = true;
-          this.reconnectAttempts = 0;
-          
-          // Send initial configuration message for Azure Speech Services
-          this.sendSpeechConfig();
-          resolve();
-        });
+      // Create speech synthesizer for TTS
+      this.speechSynthesizer = new speechSdk.SpeechSynthesizer(this.speechConfig);
 
-        this.ws.on('message', (data: WebSocketData) => {
-          this.handleMessage(data);
-        });
+      this.isConnectedFlag = true;
+      this.logger.log('Azure Speech SDK initialized successfully');
 
-        this.ws.on('error', (error: Error) => {
-          clearTimeout(connectionTimeout);
-          this.logger.error('WebSocket error:', error);
-          this.eventEmitter.emit('voice-live.error', error);
-          reject(error);
-        });
+      // Process any buffered audio
+      this.processBufferedAudio();
 
-        this.ws.on('close', (code: number, reason: string) => {
-          clearTimeout(connectionTimeout);
-          this.logger.log(`WebSocket closed: ${code} - ${reason}`);
-          this.isConnectedFlag = false;
-          this.handleReconnect();
-        });
-      } catch (error) {
-        clearTimeout(connectionTimeout);
-        this.logger.error('Failed to create WebSocket:', error);
-        reject(error);
-      }
-    });
+    } catch (error) {
+      this.logger.error('Failed to initialize Azure Speech SDK:', error);
+      throw error;
+    }
   }
 
-  private generateConnectionId(): string {
-    return `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-  }
+  private setupEventHandlers(): void {
+    if (!this.speechRecognizer) return;
 
-  private sendSpeechConfig(): void {
-    if (!this.ws || !this.isConnectedFlag) return;
+    // Handle recognition results
+    this.speechRecognizer.recognizing = (sender, e) => {
+      this.logger.debug(`Recognizing: ${e.result.text}`);
+      this.eventEmitter.emit('voice-live.recognizing', {
+        conversationId: this.conversationId,
+        text: e.result.text,
+        isPartial: true,
+      });
+    };
 
-    const config = {
-      context: {
-        system: {
-          version: '1.0.0'
-        },
-        os: {
-          platform: 'Linux',
-          name: 'Container',
-          version: '1.0'
-        },
-        device: {
-          manufacturer: 'Microsoft',
-          model: 'SpeechSDK',
-          version: '1.0'
-        }
+    this.speechRecognizer.recognized = (sender, e) => {
+      if (e.result.reason === speechSdk.ResultReason.RecognizedSpeech) {
+        this.logger.log(`Recognized: ${e.result.text}`);
+        this.eventEmitter.emit('voice-live.recognized', {
+          conversationId: this.conversationId,
+          text: e.result.text,
+          isPartial: false,
+        });
+        
+        // Process the recognized text (this would typically go to your AI model)
+        this.processRecognizedText(e.result.text);
+      } else if (e.result.reason === speechSdk.ResultReason.NoMatch) {
+        this.logger.debug('No speech could be recognized');
       }
     };
 
-    this.ws.send(JSON.stringify(config));
-    this.logger.debug('Sent initial speech configuration');
+    this.speechRecognizer.canceled = (sender, e) => {
+      this.logger.error(`Recognition canceled: ${e.reason}`);
+      if (e.reason === speechSdk.CancellationReason.Error) {
+        this.logger.error(`Error details: ${e.errorDetails}`);
+        this.eventEmitter.emit('voice-live.error', new Error(e.errorDetails));
+      }
+    };
+
+    this.speechRecognizer.sessionStarted = (sender, e) => {
+      this.logger.log('Speech recognition session started');
+      this.eventEmitter.emit('voice-live.session.started', {
+        conversationId: this.conversationId,
+        sessionId: e.sessionId,
+      });
+    };
+
+    this.speechRecognizer.sessionStopped = (sender, e) => {
+      this.logger.log('Speech recognition session stopped');
+      this.eventEmitter.emit('voice-live.session.stopped', {
+        conversationId: this.conversationId,
+        sessionId: e.sessionId,
+      });
+    };
   }
 
   async startConversation(
     conversationConfig: ConversationConfig,
     voiceConfig: VoiceLiveConfig,
   ): Promise<void> {
-    if (!this.isConnectedFlag || !this.ws) {
-      throw new Error('Not connected to Voice Live API');
+    if (!this.isConnectedFlag || !this.speechRecognizer) {
+      throw new Error('Azure Speech SDK not initialized');
     }
 
     this.conversationId = conversationConfig.callId;
 
-    const config = {
-      type: 'conversation.start',
-      conversation: {
-        id: conversationConfig.callId,
-        metadata: {
-          phoneNumber: conversationConfig.phoneNumber,
-          timestamp: new Date().toISOString(),
-        },
-      },
-      config: {
-        model: voiceConfig.model,
-        voice: voiceConfig.voice,
-        instructions: voiceConfig.instructions,
-        temperature: voiceConfig.temperature || 0.7,
-        max_response_length: voiceConfig.maxResponseLength || 4096,
-        input_audio_format: 'pcm16',
-        output_audio_format: 'pcm16',
-        turn_detection: {
-          type: 'server_vad',
-          threshold: 0.5,
-          prefix_padding_ms: 300,
-          silence_duration_ms: 500,
-        },
-        tools: this.getTools(),
-      },
-    };
+    try {
+      // Start continuous recognition
+      await this.speechRecognizer.startContinuousRecognitionAsync();
+      
+      this.logger.log(`Started conversation: ${this.conversationId}`);
+      this.eventEmitter.emit('voice-live.conversation.started', {
+        conversationId: this.conversationId,
+        config: conversationConfig,
+        voiceConfig,
+      });
 
-    this.send(config);
-    this.logger.log(`Started conversation: ${this.conversationId}`);
+    } catch (error) {
+      this.logger.error('Failed to start conversation:', error);
+      throw error;
+    }
   }
 
   sendAudio(audioData: Buffer): void {
-    if (!this.isConnectedFlag || !this.ws) {
+    if (!this.isConnectedFlag || !this.pushStream) {
+      // Buffer audio if not connected yet
       this.audioBuffer.push(audioData);
       return;
     }
 
-    // Send any buffered audio first
-    while (this.audioBuffer.length > 0) {
-      const buffered = this.audioBuffer.shift();
-      if (buffered) {
-        this.ws.send(buffered);
-      }
+    try {
+      // Convert Buffer to ArrayBuffer for Speech SDK
+      const arrayBuffer = audioData.buffer.slice(
+        audioData.byteOffset,
+        audioData.byteOffset + audioData.byteLength
+      );
+      
+      // Write audio data to push stream
+      this.pushStream.write(arrayBuffer);
+      
+    } catch (error) {
+      this.logger.error('Failed to send audio data:', error);
+      this.eventEmitter.emit('voice-live.error', error);
     }
-
-    // Send current audio
-    this.ws.send(audioData);
   }
 
-  endConversation(): void {
-    if (this.ws && this.isConnectedFlag) {
-      this.send({
-        type: 'conversation.end',
-        conversationId: this.conversationId,
+  private processBufferedAudio(): void {
+    if (this.audioBuffer.length > 0 && this.pushStream) {
+      this.logger.log(`Processing ${this.audioBuffer.length} buffered audio chunks`);
+      
+      for (const audioData of this.audioBuffer) {
+        this.sendAudio(audioData);
+      }
+      
+      this.audioBuffer = [];
+    }
+  }
+
+  private async processRecognizedText(text: string): Promise<void> {
+    // This is where you would integrate with your AI model
+    // For now, we'll just emit an event
+    this.eventEmitter.emit('voice-live.text.processed', {
+      conversationId: this.conversationId,
+      inputText: text,
+      timestamp: new Date().toISOString(),
+    });
+
+    // Example: Generate a response using TTS
+    await this.synthesizeResponse(`I heard you say: ${text}`);
+  }
+
+  private async synthesizeResponse(text: string): Promise<void> {
+    if (!this.speechSynthesizer) {
+      this.logger.warn('Speech synthesizer not available');
+      return;
+    }
+
+    try {
+      const result = await new Promise<speechSdk.SpeechSynthesisResult>((resolve, reject) => {
+        this.speechSynthesizer!.speakTextAsync(
+          text,
+          (result) => resolve(result),
+          (error) => reject(error)
+        );
       });
 
-      this.conversationId = null;
-      this.logger.log('Ended conversation');
+      if (result.reason === speechSdk.ResultReason.SynthesizingAudioCompleted) {
+        this.logger.log('Speech synthesis completed');
+        this.eventEmitter.emit('voice-live.response.synthesized', {
+          conversationId: this.conversationId,
+          text,
+          audioData: result.audioData,
+        });
+      } else {
+        this.logger.error('Speech synthesis failed:', result.errorDetails);
+      }
+
+    } catch (error) {
+      this.logger.error('Failed to synthesize speech:', error);
     }
+  }
+
+  async endConversation(): Promise<void> {
+    if (this.speechRecognizer) {
+      try {
+        await this.speechRecognizer.stopContinuousRecognitionAsync();
+        this.logger.log(`Ended conversation: ${this.conversationId}`);
+        
+        this.eventEmitter.emit('voice-live.conversation.ended', {
+          conversationId: this.conversationId,
+        });
+        
+      } catch (error) {
+        this.logger.error('Failed to stop recognition:', error);
+      }
+    }
+    
+    this.conversationId = null;
   }
 
   sendToolResult(callId: string, result: unknown): void {
-    this.send({
-      type: 'tool.result',
+    // Tool results would be processed here
+    this.eventEmitter.emit('voice-live.tool.result', {
+      conversationId: this.conversationId,
       callId,
       result,
     });
   }
 
   disconnect(): void {
-    if (this.ws) {
-      this.ws.close();
-      this.ws = null;
-      this.isConnectedFlag = false;
+    this.isConnectedFlag = false;
+    
+    if (this.speechRecognizer) {
+      this.speechRecognizer.close();
+      this.speechRecognizer = null;
     }
+    
+    if (this.speechSynthesizer) {
+      this.speechSynthesizer.close();
+      this.speechSynthesizer = null;
+    }
+    
+    if (this.pushStream) {
+      this.pushStream.close();
+      this.pushStream = null;
+    }
+    
+    this.speechConfig = null;
+    this.audioConfig = null;
+    this.conversationId = null;
+    this.audioBuffer = [];
+    
+    this.logger.log('Disconnected from Azure Speech Services');
   }
 
   isConnected(): boolean {
@@ -242,181 +318,28 @@ export class VoiceLiveService implements OnModuleInit, OnModuleDestroy {
   }
 
   getEndpoint(): string {
-    return this.configService.get<string>('voiceLive.endpoint') || '';
+    const region = this.configService.get<string>('speech.region');
+    return `https://${region}.api.cognitive.microsoft.com/`;
   }
 
-  private send(message: any): void {
-    if (this.ws && this.isConnectedFlag) {
-      const json = JSON.stringify(message);
-      this.ws.send(json);
-      this.logger.debug(`Sent message: ${message.type}`);
+  // Health check method for connectivity testing
+  async testConnection(): Promise<boolean> {
+    if (!this.speechConfig) {
+      return false;
     }
-  }
 
-  private handleMessage(data: WebSocketData): void {
     try {
-      // Check if it's binary audio data
-      if (data instanceof Buffer) {
-        this.eventEmitter.emit('voice-live.audio', data);
-        return;
-      }
-
-      // Parse JSON messages
-      const message = JSON.parse(data.toString());
-      this.logger.debug(`Received message: ${message.type}`);
-
-      switch (message.type) {
-        case 'conversation.started':
-          this.eventEmitter.emit('voice-live.conversation.started', message);
-          break;
-
-        case 'conversation.ended':
-          this.eventEmitter.emit('voice-live.conversation.ended', message);
-          break;
-
-        case 'turn.start':
-          this.eventEmitter.emit('voice-live.turn.start', message);
-          break;
-
-        case 'turn.end':
-          this.eventEmitter.emit('voice-live.turn.end', message);
-          break;
-
-        case 'speech.start':
-          this.eventEmitter.emit('voice-live.speech.start', message);
-          break;
-
-        case 'speech.end':
-          this.eventEmitter.emit('voice-live.speech.end', message);
-          break;
-
-        case 'transcript':
-          this.eventEmitter.emit('voice-live.transcript', message);
-          break;
-
-        case 'tool.call':
-          this.handleToolCall(message);
-          break;
-
-        case 'error':
-          this.logger.error('Voice Live error:', message);
-          this.eventEmitter.emit('voice-live.error', new Error(message.message));
-          break;
-
-        default:
-          this.logger.debug(`Unhandled message type: ${message.type}`);
-      }
+      // Create a simple test recognizer to verify connection
+      const testAudioConfig = speechSdk.AudioConfig.fromDefaultMicrophoneInput();
+      const testRecognizer = new speechSdk.SpeechRecognizer(this.speechConfig, testAudioConfig);
+      
+      // Test the connection by creating the recognizer
+      testRecognizer.close();
+      return true;
+      
     } catch (error) {
-      this.logger.error('Failed to handle message:', error);
+      this.logger.error('Connection test failed:', error);
+      return false;
     }
-  }
-
-  private handleToolCall(message: any): void {
-    const { tool, arguments: args, callId } = message;
-
-    this.logger.log(`Received tool call: ${tool}`);
-    this.eventEmitter.emit('voice-live.tool.call', { tool, arguments: args, callId });
-  }
-
-  private handleReconnect(): void {
-    if (this.reconnectAttempts >= this.maxReconnectAttempts) {
-      this.logger.error('Max reconnection attempts reached');
-      this.eventEmitter.emit('voice-live.disconnected');
-      return;
-    }
-
-    this.reconnectAttempts++;
-    const delay = this.reconnectDelay * Math.pow(2, this.reconnectAttempts - 1);
-
-    this.logger.log(`Attempting to reconnect (${this.reconnectAttempts}/${this.maxReconnectAttempts}) in ${delay}ms`);
-
-    setTimeout(() => {
-      this.connect().catch((error) => {
-        this.logger.error('Reconnection failed:', error);
-      });
-    }, delay);
-  }
-
-  private getTools() {
-    return [
-      {
-        type: 'function',
-        function: {
-          name: 'schedule_demo',
-          description: 'Schedule a demo appointment for the prospect',
-          parameters: {
-            type: 'object',
-            properties: {
-              date: {
-                type: 'string',
-                description: 'Preferred date for the demo (YYYY-MM-DD)',
-              },
-              time: {
-                type: 'string',
-                description: 'Preferred time for the demo (HH:MM)',
-              },
-              email: {
-                type: 'string',
-                description: 'Contact email address',
-              },
-              companyName: {
-                type: 'string',
-                description: 'Company or property management name',
-              },
-              propertyCount: {
-                type: 'number',
-                description: 'Number of properties managed',
-              },
-              phoneNumber: {
-                type: 'string',
-                description: 'Contact phone number',
-              },
-            },
-            required: ['date', 'time', 'email', 'companyName'],
-          },
-        },
-      },
-      {
-        type: 'function',
-        function: {
-          name: 'check_availability',
-          description: 'Check available demo slots for a specific date',
-          parameters: {
-            type: 'object',
-            properties: {
-              date: {
-                type: 'string',
-                description: 'Date to check availability (YYYY-MM-DD)',
-              },
-            },
-            required: ['date'],
-          },
-        },
-      },
-      {
-        type: 'function',
-        function: {
-          name: 'send_information',
-          description: 'Send product information to the prospect via email',
-          parameters: {
-            type: 'object',
-            properties: {
-              email: {
-                type: 'string',
-                description: 'Email address to send information to',
-              },
-              topics: {
-                type: 'array',
-                items: {
-                  type: 'string',
-                },
-                description: 'Topics of interest (pricing, features, integration, etc.)',
-              },
-            },
-            required: ['email'],
-          },
-        },
-      },
-    ];
   }
 } 

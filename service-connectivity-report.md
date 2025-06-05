@@ -54,10 +54,10 @@ This confirms the container app is properly integrated with the Azure virtual ne
 
 ### 2. **Voice Live API** ⚠️
 - **Status**: ⚠️ **ERROR**
-- **Latency**: ~5002ms (timeout)
-- **Endpoint**: `wss://eastus2.voice.speech.microsoft.com/cognitiveservices/websocket/v1`
-- **Message**: Connection failed: The operation was aborted due to timeout
-- **Note**: Updated to use Azure Speech Services WebSocket endpoint, but requires authentication
+- **Latency**: ~5004ms (timeout)
+- **Endpoint**: `wss://eastus2.stt.speech.microsoft.com/speech/recognition/conversation/cognitiveservices/v1`
+- **Message**: Connection timeout after 5 seconds
+- **Note**: Updated to correct Azure Speech Services WebSocket endpoint format, but requires additional parameters (language, format, etc.)
 
 ---
 
@@ -176,12 +176,12 @@ This confirms the container app is properly integrated with the Azure virtual ne
 
 ## Outstanding Issues ⚠️
 1. **Voice Live API Connectivity:** Azure Speech Services WebSocket endpoint timing out
-   - **Updated Endpoint:** `wss://eastus2.voice.speech.microsoft.com/cognitiveservices/websocket/v1`
+   - **Updated Endpoint:** `wss://eastus2.stt.speech.microsoft.com/speech/recognition/conversation/cognitiveservices/v1`
    - This may be due to:
-     - Missing authentication headers (Speech key, authorization token)
-     - Incorrect WebSocket connection parameters
-     - Need for proper Speech SDK integration instead of raw WebSocket connection
-     - Missing required query parameters (language, format, etc.)
+     - Missing required query parameters (language=en-US, format=simple, etc.)
+     - Need for proper WebSocket handshake with Speech SDK protocols
+     - Authentication headers may need to be sent during WebSocket upgrade
+     - Connection may require specific WebSocket subprotocols
 
 ## Performance Metrics
 - **Excellent Latency:** Application Insights (28ms), Key Vault (34ms)

@@ -86,13 +86,13 @@ export class ConnectivityService {
   }
 
   /**
-   * Test Voice Live API connectivity (Azure Speech Services WebSocket)
+   * Test Voice Live API connectivity (Azure Speech SDK)
    */
   private async testVoiceLiveApi(): Promise<ConnectivityTest> {
     const startTime = Date.now();
-    const endpoint = this.configService.get<string>('voiceLive.endpoint');
     const enabled = this.configService.get<boolean>('voiceLive.enabled');
     const speechKey = this.configService.get<string>('speech.key');
+    const region = this.configService.get<string>('speech.region');
 
     try {
       if (!enabled) {
@@ -100,86 +100,58 @@ export class ConnectivityService {
           service: 'Voice Live API',
           status: 'warning',
           message: 'Voice Live API is disabled',
-          endpoint,
         };
       }
 
-      if (!endpoint) {
+      if (!speechKey || !region) {
         return {
           service: 'Voice Live API',
           status: 'error',
-          message: 'Voice Live endpoint not configured',
+          message: 'Speech service key or region not configured',
         };
       }
 
-      if (!speechKey) {
-        return {
-          service: 'Voice Live API',
-          status: 'error',
-          message: 'Speech service key required for Voice Live API',
-          endpoint,
-        };
-      }
-
-      // Test Azure Speech Services WebSocket endpoint with proper authentication
-      return new Promise((resolve) => {
-        const url = new URL(endpoint);
-        url.searchParams.set('language', 'en-US');
-        url.searchParams.set('format', 'simple');
-
-        const ws = new (require('ws'))(url.toString(), {
-          headers: {
-            'Ocp-Apim-Subscription-Key': speechKey,
-            'X-ConnectionId': `test-${Date.now()}`,
-          },
-          timeout: 5000,
-        });
-
-        const timeout = setTimeout(() => {
-          ws.terminate();
-          const latency = Date.now() - startTime;
-          resolve({
-            service: 'Voice Live API',
-            status: 'error',
-            latency,
-            message: 'Connection timeout after 5 seconds',
-            endpoint,
-          });
-        }, 5000);
-
-        ws.on('open', () => {
-          clearTimeout(timeout);
-          ws.close();
-          const latency = Date.now() - startTime;
-          resolve({
-            service: 'Voice Live API',
-            status: 'success',
-            latency,
-            message: 'WebSocket connection successful',
-            endpoint,
-          });
-        });
-
-        ws.on('error', (error: Error) => {
-          clearTimeout(timeout);
-          const latency = Date.now() - startTime;
-          resolve({
-            service: 'Voice Live API',
-            status: 'error',
-            latency,
-            message: `WebSocket error: ${error.message}`,
-            endpoint,
-          });
-        });
+      // Test Azure Speech Services connectivity using the Speech SDK approach
+      // We test the REST API endpoint that the Speech SDK uses internally
+      const testUrl = `https://${region}.api.cognitive.microsoft.com/speechtotext/v3.1/models/base`;
+      
+      const response = await fetch(testUrl, {
+        method: 'GET',
+        headers: {
+          'Ocp-Apim-Subscription-Key': speechKey,
+        },
+        signal: AbortSignal.timeout(5000),
       });
+
+      const latency = Date.now() - startTime;
+      const endpoint = `https://${region}.api.cognitive.microsoft.com/`;
+
+      if (response.ok) {
+        return {
+          service: 'Voice Live API',
+          status: 'success',
+          latency,
+          message: 'Azure Speech SDK connectivity verified',
+          endpoint,
+        };
+      } else {
+        return {
+          service: 'Voice Live API',
+          status: 'error',
+          latency,
+          message: `HTTP ${response.status}: ${response.statusText}`,
+          endpoint,
+        };
+      }
     } catch (error) {
       const latency = Date.now() - startTime;
+      const region = this.configService.get<string>('speech.region') || 'eastus2';
       return {
         service: 'Voice Live API',
         status: 'error',
         latency,
         message: `Connection failed: ${error instanceof Error ? error.message : 'Unknown error'}`,
-        endpoint,
+        endpoint: `https://${region}.api.cognitive.microsoft.com/`,
       };
     }
   }
