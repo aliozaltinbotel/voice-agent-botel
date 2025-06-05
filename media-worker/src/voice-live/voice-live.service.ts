@@ -51,10 +51,20 @@ export class VoiceLiveService implements OnModuleInit, OnModuleDestroy {
 
   async connect(): Promise<void> {
     const endpoint = this.configService.get<string>('voiceLive.endpoint');
-    const speechKey = this.configService.get<string>('voiceLive.speechKey');
-    const region = this.configService.get<string>('voiceLive.region');
+    const speechKey = this.configService.get<string>('speech.key');
+    const region = this.configService.get<string>('speech.region');
 
-    this.logger.log(`Connecting to Voice Live API at ${endpoint}`);
+    if (!speechKey) {
+      throw new Error('Speech service key is required for Voice Live API connection');
+    }
+
+    // Build the proper Azure Speech Services WebSocket URL with required parameters
+    const url = new URL(endpoint!);
+    url.searchParams.set('language', 'en-US');
+    url.searchParams.set('format', 'simple');
+    url.searchParams.set('profanity', 'masked');
+
+    this.logger.log(`Connecting to Azure Speech Services at ${url.toString()}`);
 
     return new Promise((resolve, reject) => {
       // Set a timeout for connection attempt
@@ -66,18 +76,23 @@ export class VoiceLiveService implements OnModuleInit, OnModuleDestroy {
       }, 10000);
 
       try {
-        this.ws = new WebSocket(endpoint!, {
+        this.ws = new WebSocket(url.toString(), {
           headers: {
-            'Ocp-Apim-Subscription-Key': speechKey!,
-            'X-Microsoft-OutputFormat': 'audio-16khz-16bit-mono-pcm',
+            'Ocp-Apim-Subscription-Key': speechKey,
+            'X-ConnectionId': this.generateConnectionId(),
+            'Authorization': `Bearer ${speechKey}`,
+            'Content-Type': 'application/json',
           },
         });
 
         this.ws.on('open', () => {
           clearTimeout(connectionTimeout);
-          this.logger.log('Connected to Voice Live API');
+          this.logger.log('Connected to Azure Speech Services WebSocket');
           this.isConnectedFlag = true;
           this.reconnectAttempts = 0;
+          
+          // Send initial configuration message for Azure Speech Services
+          this.sendSpeechConfig();
           resolve();
         });
 
@@ -86,21 +101,53 @@ export class VoiceLiveService implements OnModuleInit, OnModuleDestroy {
         });
 
         this.ws.on('error', (error: Error) => {
+          clearTimeout(connectionTimeout);
           this.logger.error('WebSocket error:', error);
           this.eventEmitter.emit('voice-live.error', error);
           reject(error);
         });
 
         this.ws.on('close', (code: number, reason: string) => {
+          clearTimeout(connectionTimeout);
           this.logger.log(`WebSocket closed: ${code} - ${reason}`);
           this.isConnectedFlag = false;
           this.handleReconnect();
         });
       } catch (error) {
+        clearTimeout(connectionTimeout);
         this.logger.error('Failed to create WebSocket:', error);
         reject(error);
       }
     });
+  }
+
+  private generateConnectionId(): string {
+    return `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+  }
+
+  private sendSpeechConfig(): void {
+    if (!this.ws || !this.isConnectedFlag) return;
+
+    const config = {
+      context: {
+        system: {
+          version: '1.0.0'
+        },
+        os: {
+          platform: 'Linux',
+          name: 'Container',
+          version: '1.0'
+        },
+        device: {
+          manufacturer: 'Microsoft',
+          model: 'SpeechSDK',
+          version: '1.0'
+        }
+      }
+    };
+
+    this.ws.send(JSON.stringify(config));
+    this.logger.debug('Sent initial speech configuration');
   }
 
   async startConversation(

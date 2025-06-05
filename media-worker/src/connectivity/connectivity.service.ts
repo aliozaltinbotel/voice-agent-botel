@@ -86,12 +86,13 @@ export class ConnectivityService {
   }
 
   /**
-   * Test Voice Live API connectivity
+   * Test Voice Live API connectivity (Azure Speech Services WebSocket)
    */
   private async testVoiceLiveApi(): Promise<ConnectivityTest> {
     const startTime = Date.now();
     const endpoint = this.configService.get<string>('voiceLive.endpoint');
     const enabled = this.configService.get<boolean>('voiceLive.enabled');
+    const speechKey = this.configService.get<string>('speech.key');
 
     try {
       if (!enabled) {
@@ -111,34 +112,66 @@ export class ConnectivityService {
         };
       }
 
-      // Test WebSocket endpoint accessibility (basic ping)
-      const wsUrl = new URL(endpoint);
-      const httpUrl = `https://${wsUrl.host}/`;
-      
-      const response = await fetch(httpUrl, {
-        method: 'HEAD',
-        signal: AbortSignal.timeout(5000),
-      });
-
-      const latency = Date.now() - startTime;
-
-      if (response.ok || response.status === 404) { // 404 is expected for root
+      if (!speechKey) {
         return {
           service: 'Voice Live API',
-          status: 'success',
-          latency,
-          message: `Endpoint accessible (${response.status})`,
+          status: 'error',
+          message: 'Speech service key required for Voice Live API',
           endpoint,
         };
       }
 
-      return {
-        service: 'Voice Live API',
-        status: 'error',
-        latency,
-        message: `HTTP ${response.status}: ${response.statusText}`,
-        endpoint,
-      };
+      // Test Azure Speech Services WebSocket endpoint with proper authentication
+      return new Promise((resolve) => {
+        const url = new URL(endpoint);
+        url.searchParams.set('language', 'en-US');
+        url.searchParams.set('format', 'simple');
+
+        const ws = new (require('ws'))(url.toString(), {
+          headers: {
+            'Ocp-Apim-Subscription-Key': speechKey,
+            'X-ConnectionId': `test-${Date.now()}`,
+          },
+          timeout: 5000,
+        });
+
+        const timeout = setTimeout(() => {
+          ws.terminate();
+          const latency = Date.now() - startTime;
+          resolve({
+            service: 'Voice Live API',
+            status: 'error',
+            latency,
+            message: 'Connection timeout after 5 seconds',
+            endpoint,
+          });
+        }, 5000);
+
+        ws.on('open', () => {
+          clearTimeout(timeout);
+          ws.close();
+          const latency = Date.now() - startTime;
+          resolve({
+            service: 'Voice Live API',
+            status: 'success',
+            latency,
+            message: 'WebSocket connection successful',
+            endpoint,
+          });
+        });
+
+        ws.on('error', (error: Error) => {
+          clearTimeout(timeout);
+          const latency = Date.now() - startTime;
+          resolve({
+            service: 'Voice Live API',
+            status: 'error',
+            latency,
+            message: `WebSocket error: ${error.message}`,
+            endpoint,
+          });
+        });
+      });
     } catch (error) {
       const latency = Date.now() - startTime;
       return {
@@ -170,7 +203,7 @@ export class ConnectivityService {
       }
 
       // Test Speech Services endpoint accessibility
-      const testUrl = `${endpoint.replace(/\/$/, '')}/speechtotext/v3.1/transcriptions`;
+      const testUrl = `${endpoint.replace(/\/$/, '')}/speechtotext/v3.1/models/base`;
       
       const response = await fetch(testUrl, {
         method: 'GET',
