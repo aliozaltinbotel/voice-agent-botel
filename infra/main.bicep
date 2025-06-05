@@ -12,7 +12,7 @@ param location string = 'eastus2'
 param environment string = 'dev'
 
 @description('Base name for resources')
-param baseName string = 'botel-voice'
+param baseName string = 'botel-voice-v3'
 
 @description('Enable ultra-low latency optimizations')
 param enableUltraLowLatency bool = true
