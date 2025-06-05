@@ -37,7 +37,11 @@ export class VoiceLiveService implements OnModuleInit, OnModuleDestroy {
   async onModuleInit() {
     const enabled = this.configService.get<boolean>('voiceLive.enabled');
     if (enabled) {
-      await this.connect();
+      // Connect in background - don't block application startup
+      this.connect().catch((error) => {
+        this.logger.error('Failed to connect to Voice Live API during startup:', error);
+        this.logger.warn('Voice Live API will be unavailable. Application will continue without it.');
+      });
     }
   }
 
@@ -53,6 +57,14 @@ export class VoiceLiveService implements OnModuleInit, OnModuleDestroy {
     this.logger.log(`Connecting to Voice Live API at ${endpoint}`);
 
     return new Promise((resolve, reject) => {
+      // Set a timeout for connection attempt
+      const connectionTimeout = setTimeout(() => {
+        if (this.ws) {
+          this.ws.terminate();
+        }
+        reject(new Error('Connection timeout after 10 seconds'));
+      }, 10000);
+
       try {
         this.ws = new WebSocket(endpoint!, {
           headers: {
@@ -62,6 +74,7 @@ export class VoiceLiveService implements OnModuleInit, OnModuleDestroy {
         });
 
         this.ws.on('open', () => {
+          clearTimeout(connectionTimeout);
           this.logger.log('Connected to Voice Live API');
           this.isConnectedFlag = true;
           this.reconnectAttempts = 0;
@@ -75,6 +88,7 @@ export class VoiceLiveService implements OnModuleInit, OnModuleDestroy {
         this.ws.on('error', (error: Error) => {
           this.logger.error('WebSocket error:', error);
           this.eventEmitter.emit('voice-live.error', error);
+          reject(error);
         });
 
         this.ws.on('close', (code: number, reason: string) => {
