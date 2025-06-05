@@ -1,0 +1,74 @@
+[
+  {
+    "name": "NODE_ENV",
+    "value": "dev"
+  },
+  {
+    "name": "PORT",
+    "value": "8080"
+  },
+  {
+    "name": "VOICE_LIVE_ENABLED",
+    "value": "true"
+  },
+  {
+    "name": "VOICE_LIVE_ENDPOINT",
+    "value": "wss://eastus2.voice.speech.microsoft.com/cognitiveservices/websocket/v1"
+  },
+  {
+    "name": "VOICE_LIVE_MODEL",
+    "value": "gpt-4o-realtime-preview"
+  },
+  {
+    "name": "ACS_CONNECTION_STRING",
+    "secretRef": "acs-connection-string"
+  },
+  {
+    "name": "SPEECH_ENDPOINT",
+    "value": "https://speech-botel-voice-v2-dev.cognitiveservices.azure.com/"
+  },
+  {
+    "name": "SPEECH_KEY",
+    "secretRef": "speech-key"
+  },
+  {
+    "name": "SPEECH_REGION",
+    "value": "eastus2"
+  },
+  {
+    "name": "COSMOS_ENDPOINT",
+    "value": "https://cosmos-botel-voice-v2-dev.documents.azure.com:443/"
+  },
+  {
+    "name": "COSMOS_KEY",
+    "secretRef": "cosmos-key"
+  },
+  {
+    "name": "COSMOS_DATABASE_NAME",
+    "value": "voice-agent-db"
+  },
+  {
+    "name": "COSMOS_CONTAINER_NAME",
+    "value": "conversations"
+  },
+  {
+    "name": "APPLICATIONINSIGHTS_CONNECTION_STRING",
+    "value": "InstrumentationKey=46ca978a-6d77-41bf-bc4c-51ca14fbb587;IngestionEndpoint=https://eastus2-3.in.applicationinsights.azure.com/;LiveEndpoint=https://eastus2.livediagnostics.monitor.azure.com/;ApplicationId=880bd0c3-0698-470a-8554-9a3f80e850a1"
+  },
+  {
+    "name": "KEY_VAULT_NAME",
+    "value": "kv-botelvoi-dev-ke6kxo"
+  },
+  {
+    "name": "AZURE_TENANT_ID",
+    "value": "$(az account show --query tenantId -o tsv)"
+  },
+  {
+    "name": "ENABLE_PRIVATE_ENDPOINTS",
+    "value": "true"
+  },
+  {
+    "name": "VNET_INTEGRATION",
+    "value": "true"
+  }
+] 
