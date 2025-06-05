@@ -294,4 +294,4 @@ az monitor metrics list \
 
 ## 📄 License
 
-This project is proprietary to Botel AI. All rights reserved. 
+This project is proprietary to Botel AI. All rights reserved. # Fresh deployment with v3 infrastructure - 06/05/2025 22:49:51
