@@ -1,0 +1,60 @@
+containers:
+- name: media-worker
+  image: ghcr.io/aliozaltinbotel/voice-agent-botel:latest
+  command: 
+    - dumb-init
+  args:
+    - --
+    - node
+    - dist/main
+  env:
+    - name: VOICE_LIVE_ENABLED
+      value: "true"
+    - name: VOICE_LIVE_ENDPOINT
+      value: "wss://eastus2.voice.speech.microsoft.com/cognitiveservices/websocket/v1"
+    - name: VOICE_LIVE_MODEL
+      value: "gpt-4o-realtime-preview"
+    - name: ACS_CONNECTION_STRING
+      secretRef: acs-connection-string
+    - name: SPEECH_KEY
+      secretRef: speech-key
+    - name: SPEECH_REGION
+      value: "eastus2"
+    - name: COSMOS_ENDPOINT
+      value: "https://cosmos-botel-voice-v2-dev.documents.azure.com:443/"
+    - name: COSMOS_KEY
+      secretRef: cosmos-key
+    - name: APPLICATIONINSIGHTS_CONNECTION_STRING
+      value: "InstrumentationKey=46ca978a-6d77-41bf-bc4c-51ca14fbb587;IngestionEndpoint=https://eastus2-3.in.applicationinsights.azure.com/;LiveEndpoint=https://eastus2.livediagnostics.monitor.azure.com/;ApplicationId=880bd0c3-0698-470a-8554-9a3f80e850a1"
+    - name: NODE_ENV
+      value: "production"
+    - name: PORT
+      value: "8080"
+    - name: SPEECH_ENDPOINT
+      value: "https://speech-botel-voice-v2-dev.cognitiveservices.azure.com/"
+    - name: COSMOS_DATABASE_NAME
+      value: "voice-agent-db"
+    - name: COSMOS_CONTAINER_NAME
+      value: "conversations"
+    - name: KEY_VAULT_NAME
+      value: "kv-botelvoi-dev-ke6kxo"
+    - name: ENABLE_PRIVATE_ENDPOINTS
+      value: "true"
+    - name: VNET_INTEGRATION
+      value: "true"
+  resources:
+    cpu: 2
+    memory: 4Gi
+  probes:
+    - type: Liveness
+      httpGet:
+        path: /health/live
+        port: 8080
+      initialDelaySeconds: 30
+      periodSeconds: 30
+    - type: Readiness
+      httpGet:
+        path: /health/ready
+        port: 8080
+      initialDelaySeconds: 10
+      periodSeconds: 10 
